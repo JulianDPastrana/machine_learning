@@ -2,9 +2,8 @@ import torch
 from torch import nn
 from GPNet.utilities import Module, DataModule, Trainer, add_to_class
 
+
 # Create Synthetic DataModule
-
-
 class SyntheticRegressionData(DataModule):
     """Synthetic data for linear regression."""
 
@@ -41,8 +40,6 @@ def forward(self, X):
 
 
 # Defining the Loss Function
-
-
 @add_to_class(LinearRegression)
 def loss(self, y_hat, y):
     fn = nn.MSELoss()
@@ -50,8 +47,6 @@ def loss(self, y_hat, y):
 
 
 # Defining the OptimizationAlgorithm
-
-
 @add_to_class(LinearRegression)
 def configure_optimizers(self):
     return torch.optim.SGD(self.parameters(), self.lr)
@@ -64,11 +59,12 @@ trainer = Trainer(max_epochs=3)
 trainer.fit(model, data)
 
 
-@add_to_class(LinearRegression)  #@save
+@add_to_class(LinearRegression)
 def get_w_b(self):
     return (self.net.weight.data, self.net.bias.data)
+
+
 w, b = model.get_w_b()
 
-print(f'error in estimating w: {data.w - w.reshape(data.w.shape)}')
-print(f'error in estimating b: {data.b - b}')
-
+print(f"error in estimating w: {data.w - w.reshape(data.w.shape)}")
+print(f"error in estimating b: {data.b - b}")
