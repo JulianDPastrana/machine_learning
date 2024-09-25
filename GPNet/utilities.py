@@ -4,7 +4,6 @@ import numpy as numpy
 import torch
 from matplotlib import pyplot as plt
 from matplotlib_inline import backend_inline
-from IPython import display
 
 
 def use_svg_display():
@@ -158,8 +157,8 @@ class ProgressBoard(HyperParameters):
         axes.set_xscale(self.xscale)
         axes.set_yscale(self.yscale)
         axes.legend(plt_lines, labels)
-        display.display(self.fig)
-        display.clear_output(wait=True)
+        plt.show(block=False)
+        plt.pause(0.1)
 
 
 class Module(torch.nn.Module, HyperParameters):
@@ -263,6 +262,7 @@ class Trainer(HyperParameters):
         self.val_batch_idx = 0
         for self.epoch in range(self.max_epochs):
             self.fit_epoch()
+        plt.savefig("../training_curve.png")
 
     def prepare_batch(self, batch):
         return batch
