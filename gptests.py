@@ -5,10 +5,11 @@ from gpytorch.variational import CholeskyVariationalDistribution, VariationalStr
 import numpy as np
 import tqdm
 from matplotlib import pyplot as plt
+from torch.optim import Optimizer
 from torch.utils.data import TensorDataset, DataLoader
 
 # Training data is 100 points in [0,1] inclusive regularly spaced
-train_x = torch.linspace(0, 1, 256)
+train_x = torch.linspace(0, 1, 512)
 # True function is sin(2*pi*x) with Gaussian noise
 train_y = torch.sin(train_x * (2 * np.pi)) + torch.randn(train_x.size()) * np.sqrt(0.04)
 
@@ -44,7 +45,26 @@ class GPModel(ApproximateGP):
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
 
-num_inducing_points = 10
+class SGD(Optimizer):
+    """Minibatch stochastic gradient descent."""
+    def __init__(self, params, lr):
+        defaults = dict(lr=lr)
+        super(SGD, self).__init__(params, defaults)
+
+    def step(self):
+        for group in self.param_groups:
+            for param in group["params"]:
+                param.data -= group["lr"] * param.grad.data
+            
+
+    def zero_grad(self):
+        for group in self.param_groups:
+            for param in group["params"]:
+                if param.grad is not None:
+                    param.grad.zero_()
+
+
+num_inducing_points = 15
 inducing_points = torch.linspace(0, 1, num_inducing_points)
 model = GPModel(inducing_points=inducing_points)
 
@@ -54,16 +74,16 @@ likelihood = gpytorch.likelihoods.GaussianLikelihood()
 # Find optimal model hyperparameters
 model.train()
 likelihood.train()
-
-# Use the adam optimizer
-optimizer = torch.optim.Adam(
-    [{"params": model.parameters()}, {"params": likelihood.parameters()}], lr=0.01
-)  # Includes GaussianLikelihood parameters
+# Use custom optimizer
+optimizer = SGD(
+    params=[{"params": model.parameters()}, {"params": likelihood.parameters()}],
+    lr=0.05
+)
 
 # "Loss" for GPs - We are using the Variational ELBO
 mll = gpytorch.mlls.VariationalELBO(likelihood, model, num_data=train_y.size(0))
 
-num_epochs = 50
+num_epochs = 150
 epoch_iter = tqdm.tqdm(range(num_epochs), desc="Epoch")
 for i in epoch_iter:
     # Within each iteration, we will go over each minibatch of data
