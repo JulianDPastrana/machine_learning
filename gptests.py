@@ -104,7 +104,7 @@ for i in epoch_iter:
     for x_batch, y_batch in minibatch_iter:
         variational_ngd_optimizer.zero_grad()
         hyperparameter_optimizer.zero_grad()
-        output = likelihood(model(x_batch))
+        output = model(x_batch)
         loss = -mll(output, y_batch)
         minibatch_iter.set_postfix(loss=loss.item())
         loss.backward()
