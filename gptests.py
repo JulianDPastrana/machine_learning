@@ -1,7 +1,7 @@
 import torch
 import gpytorch
 from gpytorch.models import ApproximateGP
-from gpytorch.variational import CholeskyVariationalDistribution, VariationalStrategy
+from gpytorch.variational import CholeskyVariationalDistribution, VariationalStrategy, TrilNaturalVariationalDistribution
 import numpy as np
 import tqdm
 from matplotlib import pyplot as plt
@@ -26,7 +26,7 @@ test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
 class GPModel(ApproximateGP):
     def __init__(self, inducing_points):
-        variational_distribution = CholeskyVariationalDistribution(
+        variational_distribution = TrilNaturalVariationalDistribution(
             inducing_points.size(0)
         )
         variational_strategy = VariationalStrategy(
@@ -75,11 +75,24 @@ likelihood = gpytorch.likelihoods.GaussianLikelihood()
 model.train()
 likelihood.train()
 # Use custom optimizer
-optimizer = SGD(
-    params=[{"params": model.parameters()}, {"params": likelihood.parameters()}],
-    lr=0.05
+# optimizer = SGD(
+#     params=[{"params": model.parameters()}, {"params": likelihood.parameters()}],
+#     lr=0.05
+# )
+
+variational_ngd_optimizer = gpytorch.optim.NGD(
+    model.variational_parameters(),
+    num_data=train_y.size(0),
+    lr=0.1
 )
 
+hyperparameter_optimizer = torch.optim.Adam(
+    [
+        {"params": model.hyperparameters()},
+        {"params": likelihood.parameters()}
+    ],
+    lr=0.01
+)
 # "Loss" for GPs - We are using the Variational ELBO
 mll = gpytorch.mlls.VariationalELBO(likelihood, model, num_data=train_y.size(0))
 
@@ -89,12 +102,15 @@ for i in epoch_iter:
     # Within each iteration, we will go over each minibatch of data
     minibatch_iter = tqdm.tqdm(train_loader, desc="Minibatch", leave=False)
     for x_batch, y_batch in minibatch_iter:
-        optimizer.zero_grad()
-        output = model(x_batch)
+        variational_ngd_optimizer.zero_grad()
+        hyperparameter_optimizer.zero_grad()
+        output = likelihood(model(x_batch))
         loss = -mll(output, y_batch)
         minibatch_iter.set_postfix(loss=loss.item())
         loss.backward()
-        optimizer.step()
+        variational_ngd_optimizer.step()
+        hyperparameter_optimizer.step()
+
 # Get into evaluation (predictive posterior) mode
 model.eval()
 likelihood.eval()
