@@ -10,11 +10,12 @@ from torch.utils.data import TensorDataset, DataLoader
 
 # Function to generate heteroskedastic noise (noise increasing with x)
 def heteroskedastic_noise(x, base_std=0.1, scale=0.5):
-    return torch.randn(x.size()) * (base_std + scale * x)
+    return torch.randn(x.size()) * torch.cos(6*np.pi*x)
+
 
 
 # Training data: 512 points in [0,1] inclusive, regularly spaced
-train_x = torch.linspace(0, 1, 8000).unsqueeze(-1)
+train_x = torch.linspace(0, 1, 10*1024).unsqueeze(-1)
 
 # Generating the training labels with heteroskedastic noise
 train_y = torch.hstack(
@@ -31,7 +32,7 @@ train_y = torch.hstack(
 )
 
 # Test data: 50 points in [0, 1.5] regularly spaced
-test_x = torch.linspace(0, 1.5, 50).unsqueeze(-1)
+test_x = torch.linspace(0, 1.25, 50).unsqueeze(-1)
 
 # Generating the test labels with heteroskedastic noise
 test_y = torch.hstack(
@@ -47,7 +48,7 @@ test_y = torch.hstack(
     ]
 )
 
-batch_size = 64
+batch_size = 1024
 train_dataset = TensorDataset(train_x, train_y)
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
@@ -132,7 +133,7 @@ variational_ngd_optimizer = gpytorch.optim.NGD(
 )
 
 hyperparameter_optimizer = torch.optim.Adam(
-    [{"params": model.hyperparameters()}, {"params": likelihood.parameters()}], lr=0.01
+    model.hyperparameters(), lr=0.01
 )
 # "Loss" for GPs - We are using the Variational ELBO
 mll = gpytorch.mlls.DeepApproximateMLL(
@@ -161,6 +162,7 @@ likelihood.eval()
 # Make predictions by feeding model through likelihood
 with torch.no_grad(), gpytorch.settings.fast_pred_var():
     observed_pred = likelihood(model(test_x))
+    print(observed_pred)
     mean = observed_pred.mean.mean(0)
     variance = observed_pred.variance.mean(0)
     lower = mean - 1.96 * variance.sqrt()
