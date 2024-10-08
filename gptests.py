@@ -7,71 +7,55 @@ from matplotlib import pyplot as plt
 from torch.optim import Optimizer
 from torch.utils.data import TensorDataset, DataLoader
 
+def heteroskedastic_data(x):
+    return torch.hstack(
+            [
+                torch.normal(torch.sin(2*np.pi*x), torch.exp(torch.cos(np.pi*x))),
+                torch.normal(-torch.cos(2*np.pi*x), torch.exp(torch.sin(np.pi*x))),
+                ]
+            )
 
-# Function to generate heteroskedastic noise (noise increasing with x)
-def heteroskedastic_noise(x, base_std=0.1, scale=0.5):
-    return torch.randn(x.size()) * torch.cos(6*np.pi*x)
 
-
-
-# Training data: 512 points in [0,1] inclusive, regularly spaced
-train_x = torch.linspace(0, 1, 10*1024).unsqueeze(-1)
+train_x = torch.linspace(0, 3, 2048).unsqueeze(-1)
 
 # Generating the training labels with heteroskedastic noise
-train_y = torch.hstack(
-    [
-        torch.sin(train_x * (2 * np.pi))
-        + heteroskedastic_noise(train_x, base_std=0.1, scale=0.5),
-        -torch.cos(train_x * (2 * np.pi))
-        + heteroskedastic_noise(train_x, base_std=0.1, scale=0.5),
-        torch.sin(train_x * (2 * np.pi))
-        + 2 * torch.cos(train_x * (2 * np.pi))
-        + heteroskedastic_noise(train_x, base_std=0.1, scale=0.5),
-        train_x + heteroskedastic_noise(train_x, base_std=0.1, scale=0.5),
-    ]
-)
+train_y = heteroskedastic_data(train_x)
 
 # Test data: 50 points in [0, 1.5] regularly spaced
-test_x = torch.linspace(0, 1.25, 50).unsqueeze(-1)
+test_x = torch.linspace(0, 3, 50).unsqueeze(-1)
 
 # Generating the test labels with heteroskedastic noise
-test_y = torch.hstack(
-    [
-        torch.sin(test_x * (2 * np.pi))
-        + heteroskedastic_noise(test_x, base_std=0.1, scale=0.5),
-        -torch.cos(test_x * (2 * np.pi))
-        + heteroskedastic_noise(test_x, base_std=0.1, scale=0.5),
-        torch.sin(test_x * (2 * np.pi))
-        + 2 * torch.cos(test_x * (2 * np.pi))
-        + heteroskedastic_noise(test_x, base_std=0.1, scale=0.5),
-        test_x + heteroskedastic_noise(test_x, base_std=0.1, scale=0.5),
-    ]
-)
+test_y = heteroskedastic_data(test_x)
 
-batch_size = 1024
+batch_size = 32
 train_dataset = TensorDataset(train_x, train_y)
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
 test_dataset = TensorDataset(test_x, test_y)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
+gpytorch.settings.num_likelihood_samples._set_value(100)
+# gpytorch.settings.num_contour_quadrature(100)
+
+
+class VariationalELBO(gpytorch.mlls._approximate_mll._ApproximateMarginalLogLikelihood):
+
+    def _log_likelihood_term(self, variational_dist_f, target, **kwargs):
+        return self.likelihood.expected_log_prob(target, variational_dist_f, **kwargs).mean(-1)
+
+    def forward(self, variational_dist_f, target, **kwargs):
+        return super().forward(variational_dist_f, target, **kwargs)
+
 
 class ChainedGaussianLikelihood(gpytorch.likelihoods.Likelihood):
-    def __init__(self, output_dims):
+    def __init__(self):
         super().__init__()
-        self.output_dims = output_dims
-        # self.num_params = 2 * output_dims
+        self.has_analytic_marginal=False
 
     def forward(self, function_samples):
         mean = function_samples[..., ::2]
         variance = torch.exp(function_samples[..., 1::2])
         return torch.distributions.normal.Normal(loc=mean, scale=variance)
-
-    # def expected_log_prob(observations, function_dist):
-    #     log_prob_lambda = lambda function_samples: self.forward(
-    #         function_samples
-    #     ).log_prob(observations)
-    #     return self.quadrature(log_prob_lambda, function_dist)
 
 
 class MultitaskGPModel(gpytorch.models.ApproximateGP):
@@ -108,10 +92,10 @@ class MultitaskGPModel(gpytorch.models.ApproximateGP):
         )
 
 
-output_dims = 4
+output_dims = 2
 input_dims = 1
-num_latents = 8
-num_inducing = 32
+num_latents = 4
+num_inducing = 64
 model = MultitaskGPModel(
     num_latents=num_latents,
     output_dims=2*output_dims,
@@ -120,7 +104,7 @@ model = MultitaskGPModel(
 )
 
 # initialize likelihood and model
-likelihood = ChainedGaussianLikelihood(output_dims=output_dims)
+likelihood = ChainedGaussianLikelihood()
 # print(likelihood(model(train_x)).expected_log_prob(train_y))
 
 # sys.exit()
@@ -136,11 +120,10 @@ hyperparameter_optimizer = torch.optim.Adam(
     model.hyperparameters(), lr=0.01
 )
 # "Loss" for GPs - We are using the Variational ELBO
-mll = gpytorch.mlls.DeepApproximateMLL(
-    gpytorch.mlls.VariationalELBO(likelihood, model, num_data=train_y.size(0))
-)
+mll = VariationalELBO(likelihood, model, num_data=train_y.size(0))
 
-num_epochs = 50
+num_epochs = 100
+
 epoch_iter = tqdm.tqdm(range(num_epochs), desc="Epoch")
 for i in epoch_iter:
     # Within each iteration, we will go over each minibatch of data
@@ -149,12 +132,12 @@ for i in epoch_iter:
         variational_ngd_optimizer.zero_grad()
         hyperparameter_optimizer.zero_grad()
         output = model(x_batch)
-        loss = -mll(output, y_batch)
-        minibatch_iter.set_postfix(loss=loss.item())
+        loss = -mll(output, y_batch).mean()
+        minibatch_iter.set_postfix(loss=f"{loss.item():.2e}")
         loss.backward()
         variational_ngd_optimizer.step()
         hyperparameter_optimizer.step()
-
+print(output)
 # Get into evaluation (predictive posterior) mode
 model.eval()
 likelihood.eval()
@@ -183,8 +166,8 @@ for task in range(output_dims):
 
     # Initialize plot
     # Plot training data as black stars
-    ax.plot(test_x.squeeze(-1).numpy(), test_y[:, task].numpy(), "k*")
-
+    ax.plot(test_x.squeeze(-1).numpy(), test_y[:, task].numpy(), "r*")
+    ax.plot(train_x.squeeze(-1).numpy(), train_y[:, task].numpy(), "k*")
     # Plot predictive means as blue line
     ax.plot(test_x.squeeze(-1).numpy(), mean[:, task].numpy(), "b")
 
@@ -196,7 +179,7 @@ for task in range(output_dims):
         alpha=0.5,
     )
 
-    ax.legend(["Observed Data", "Mean", "Confidence"])
+    ax.legend(["Test Data", "Test Data", "Mean", "Confidence"])
     ax.set_xmargin(0)
     ax.set_title(f"Output {task + 1}")
 
