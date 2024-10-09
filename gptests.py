@@ -1,9 +1,7 @@
-import sys
 import torch
 import gpytorch
 import numpy as np
 import tqdm
-from abc import ABC
 from matplotlib import pyplot as plt
 
 
@@ -79,7 +77,7 @@ class VariationalELBO(gpytorch.module.Module):
         return log_likehood - kl_divergence
 
 
-class ChainedGaussianLikelihood(gpytorch.module.Module, ABC):
+class ChainedGaussianLikelihood(gpytorch.module.Module):
 
     def __init__(self):
         super().__init__()
