@@ -3,59 +3,130 @@ import torch
 import gpytorch
 import numpy as np
 import tqdm
+from abc import ABC
 from matplotlib import pyplot as plt
-from torch.optim import Optimizer
-from torch.utils.data import TensorDataset, DataLoader
+
 
 def heteroskedastic_data(x):
     return torch.hstack(
-            [
-                torch.normal(torch.sin(2*np.pi*x), torch.exp(torch.cos(np.pi*x))),
-                torch.normal(-torch.cos(2*np.pi*x), torch.exp(torch.sin(np.pi*x))),
-                ]
-            )
+        [
+            torch.normal(torch.sin(2 * np.pi * x), torch.exp(torch.cos(np.pi * x))),
+            torch.normal(-torch.cos(2 * np.pi * x), torch.exp(torch.sin(np.pi * x))),
+            torch.normal(
+                x, torch.heaviside(torch.sin(4 * np.pi * x), torch.zeros_like(x)) + 1e-2
+            ),
+            torch.normal(
+                torch.heaviside(torch.sin(np.pi * x), torch.zeros_like(x)), 0.2 * x
+            ),
+        ]
+    )
 
 
-train_x = torch.linspace(0, 3, 2048).unsqueeze(-1)
-
-# Generating the training labels with heteroskedastic noise
+train_x = torch.linspace(0, 2.5, 1000).unsqueeze(-1)
 train_y = heteroskedastic_data(train_x)
-
-# Test data: 50 points in [0, 1.5] regularly spaced
-test_x = torch.linspace(0, 3, 50).unsqueeze(-1)
-
-# Generating the test labels with heteroskedastic noise
+test_x = torch.linspace(0, 2.5, 250).unsqueeze(-1)
 test_y = heteroskedastic_data(test_x)
 
-batch_size = 32
-train_dataset = TensorDataset(train_x, train_y)
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+batch_size = 128
+train_dataset = torch.utils.data.TensorDataset(train_x, train_y)
+train_loader = torch.utils.data.DataLoader(
+    train_dataset, batch_size=batch_size, shuffle=True
+)
 
-test_dataset = TensorDataset(test_x, test_y)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+test_dataset = torch.utils.data.TensorDataset(test_x, test_y)
+test_loader = torch.utils.data.DataLoader(
+    test_dataset, batch_size=batch_size, shuffle=False
+)
 
-gpytorch.settings.num_likelihood_samples._set_value(100)
-# gpytorch.settings.num_contour_quadrature(100)
+
+class NGD(torch.optim.Optimizer):
+
+    def __init__(self, params, num_data, lr):
+        self.num_data = num_data
+        super().__init__(params, defaults=dict(lr=lr))
+
+    @torch.no_grad()
+    def step(self):
+        for group in self.param_groups:
+            for param in group["params"]:
+                if param.grad is None:
+                    continue
+                param.add_(param.grad, alpha=(-group["lr"] * self.num_data))
 
 
-class VariationalELBO(gpytorch.mlls._approximate_mll._ApproximateMarginalLogLikelihood):
+class VariationalELBO(gpytorch.module.Module):
+
+    def __init__(self, likelihood, model, num_data):
+        super().__init__()
+        self.likelihood = likelihood
+        self.model = model
+        self.num_data = num_data
 
     def _log_likelihood_term(self, variational_dist_f, target, **kwargs):
-        return self.likelihood.expected_log_prob(target, variational_dist_f, **kwargs).mean(-1)
+        return self.likelihood.expected_log_prob(
+            target, variational_dist_f, **kwargs
+        ).sum()
 
-    def forward(self, variational_dist_f, target, **kwargs):
-        return super().forward(variational_dist_f, target, **kwargs)
+    def forward(self, approximate_dist_f, target, **kwargs):
+        num_batch = approximate_dist_f.event_shape[0]
+        log_likehood = self._log_likelihood_term(approximate_dist_f, target).div(
+            num_batch
+        )
+        kl_divergence = self.model.variational_strategy.kl_divergence().div(
+            self.num_data
+        )
+
+        return log_likehood - kl_divergence
 
 
-class ChainedGaussianLikelihood(gpytorch.likelihoods.Likelihood):
+class ChainedGaussianLikelihood(gpytorch.module.Module, ABC):
+
     def __init__(self):
         super().__init__()
-        self.has_analytic_marginal=False
+
+    def _draw_likelihood_samples(self, function_dist):
+        sample_shape = torch.Size([100])
+        if self.training:
+            num_event_dims = len(function_dist.event_shape)
+            function_dist = gpytorch.distributions.base_distributions.Normal(
+                function_dist.mean, function_dist.variance.sqrt()
+            )
+            function_dist = gpytorch.distributions.base_distributions.Independent(
+                function_dist, num_event_dims - 1
+            )
+        function_samples = function_dist.rsample(sample_shape)
+        return self.forward(function_samples)
+
+    def expected_log_prob(self, observations, function_dist):
+        likelihood_samples = self._draw_likelihood_samples(function_dist)
+        return likelihood_samples.log_prob(observations).mean(dim=0)
 
     def forward(self, function_samples):
         mean = function_samples[..., ::2]
         variance = torch.exp(function_samples[..., 1::2])
-        return torch.distributions.normal.Normal(loc=mean, scale=variance)
+        return gpytorch.distributions.base_distributions.Normal(mean, variance.sqrt())
+
+    def log_marginal(self, observations, function_dist):
+        raise NotImplementedError
+
+    def marginal(self, function_dist):
+        return self._draw_likelihood_samples(function_dist)
+
+    def __call__(self, input_):
+        # Conditional
+        if torch.is_tensor(input_):
+            return super().__call__(input_)
+        # Maarginal
+        elif isinstance(input_, gpytorch.distributions.MultivariateNormal):
+            return self.marginal(input_)
+        # Error
+        else:
+            raise RuntimeError(
+                "Likelihoods expects a MultivariateNormal input to make marginal predictions, or a"
+                " torch.Tensor for conditional predictions. Got a {}".format(
+                    input_.__class__.__name__
+                )
+            )
 
 
 class MultitaskGPModel(gpytorch.models.ApproximateGP):
@@ -81,7 +152,7 @@ class MultitaskGPModel(gpytorch.models.ApproximateGP):
         )
 
         super().__init__(variational_strategy)
-        self.mean_module = gpytorch.means.ConstantMean(batch_shape=batch_shape)
+        self.mean_module = gpytorch.means.ZeroMean(batch_shape=batch_shape)
         self.covar_module = gpytorch.kernels.ScaleKernel(
             gpytorch.kernels.RBFKernel(batch_shape=batch_shape), batch_shape=batch_shape
         )
@@ -92,37 +163,30 @@ class MultitaskGPModel(gpytorch.models.ApproximateGP):
         )
 
 
-output_dims = 2
+output_dims = 4
 input_dims = 1
-num_latents = 4
-num_inducing = 64
+num_latents = 8
+num_inducing = 100
 model = MultitaskGPModel(
     num_latents=num_latents,
-    output_dims=2*output_dims,
+    output_dims=2 * output_dims,
     input_dims=input_dims,
     num_inducing=num_inducing,
 )
 
-# initialize likelihood and model
 likelihood = ChainedGaussianLikelihood()
-# print(likelihood(model(train_x)).expected_log_prob(train_y))
-
-# sys.exit()
-# Find optimal model hyperparameters
 model.train()
 likelihood.train()
 
-variational_ngd_optimizer = gpytorch.optim.NGD(
-    model.variational_parameters(), num_data=train_y.size(0), lr=0.1
+variational_ngd_optimizer = NGD(
+    model.variational_parameters(), num_data=train_y.size(0), lr=0.5
 )
 
-hyperparameter_optimizer = torch.optim.Adam(
-    model.hyperparameters(), lr=0.01
-)
+hyperparameter_optimizer = torch.optim.Adam(model.hyperparameters(), lr=0.01)
 # "Loss" for GPs - We are using the Variational ELBO
 mll = VariationalELBO(likelihood, model, num_data=train_y.size(0))
 
-num_epochs = 100
+num_epochs = 250
 
 epoch_iter = tqdm.tqdm(range(num_epochs), desc="Epoch")
 for i in epoch_iter:
@@ -132,12 +196,12 @@ for i in epoch_iter:
         variational_ngd_optimizer.zero_grad()
         hyperparameter_optimizer.zero_grad()
         output = model(x_batch)
-        loss = -mll(output, y_batch).mean()
+        loss = -mll(output, y_batch)
         minibatch_iter.set_postfix(loss=f"{loss.item():.2e}")
         loss.backward()
         variational_ngd_optimizer.step()
         hyperparameter_optimizer.step()
-print(output)
+
 # Get into evaluation (predictive posterior) mode
 model.eval()
 likelihood.eval()
@@ -145,9 +209,8 @@ likelihood.eval()
 # Make predictions by feeding model through likelihood
 with torch.no_grad(), gpytorch.settings.fast_pred_var():
     observed_pred = likelihood(model(test_x))
-    print(observed_pred)
-    mean = observed_pred.mean.mean(0)
-    variance = observed_pred.variance.mean(0)
+    mean = observed_pred.mean.mean(dim=0)
+    variance = observed_pred.variance.mean(dim=0)
     lower = mean - 1.96 * variance.sqrt()
     upper = mean + 1.96 * variance.sqrt()
 
