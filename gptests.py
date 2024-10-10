@@ -5,38 +5,19 @@ import tqdm
 from matplotlib import pyplot as plt
 
 
-
 def heteroskedastic_data(x):
     return torch.hstack(
         [
-            torch.normal(torch.sin(2 * np.pi * x), 0.1 + 0.5 * torch.exp(torch.cos(np.pi * x))),  # Sinusoidal mean, exponential variance
-            torch.normal(-torch.cos(2 * np.pi * x), 0.1 + 0.5 * torch.exp(torch.sin(np.pi * x))),  # Cosine mean, exponential variance
-            torch.normal(x, 0.1 + 0.2 * torch.heaviside(torch.sin(4 * np.pi * x), torch.zeros_like(x))),  # Linear mean, sinusoidal variance
-            torch.normal(torch.heaviside(torch.sin(np.pi * x), torch.zeros_like(x)), 0.05 + 0.2 * x),  # Step mean, linear variance
-            torch.normal(torch.exp(-x), 0.2 + 0.3 * x),  # Exponential decay mean, linear variance
-            torch.normal(torch.log(1 + x), 0.1 + 0.3 * x),  # Logarithmic mean, linear variance
-            torch.normal(torch.sin(3 * np.pi * x), 0.05 + 0.2 * torch.abs(x - 1)),  # Sinusoidal mean, abs-based variance
-            torch.normal(-x**2, 0.1 + 0.4 * x**2),  # Quadratic mean, quadratic variance
-            torch.normal(x**3, 0.1 + 0.4 * torch.abs(x)),  # Cubic mean, abs-linear variance
-            torch.normal(1 / (1 + x), 0.3 + 0.3 * torch.sin(2 * np.pi * x)),  # Reciprocal mean, sinusoidal variance
-            torch.normal(torch.sqrt(x + 1e-3), 0.1 + 0.2 * torch.exp(-x)),  # Square root mean, exponential decay variance
-            torch.normal(torch.tanh(x), 0.1 + 0.5 * torch.abs(torch.cos(np.pi * x))),  # Hyperbolic tangent mean, cosine variance
-            torch.normal(1 / (x + 1), 0.1 + 0.3 * torch.heaviside(torch.sin(3 * np.pi * x), torch.zeros_like(x))),  # Reciprocal mean, heaviside variance
-            torch.normal(torch.abs(x - 1.25), 0.4 + 0.4 * torch.sin(2 * np.pi * x)),  # Absolute value mean, sinusoidal variance
-            torch.normal(torch.log(x + 1), 0.3 + 0.3 * torch.cos(np.pi * x)),  # Logarithmic mean, cosine variance
-            torch.normal(-torch.log(1 + x), 0.1 + 0.3 * torch.abs(x - 1.25)),  # Negative logarithmic mean, abs-based variance
-            torch.normal(torch.sin(5 * np.pi * x), 0.1 + 0.2 * torch.exp(torch.sin(2 * np.pi * x))),  # High-frequency sinusoidal mean, sinusoidal variance
-            torch.normal(torch.abs(x), 0.1 + 0.4 * x**2),  # Absolute value mean, quadratic variance
-            torch.normal(torch.exp(x - 2.5), 0.1 + 0.5 * torch.abs(torch.sin(np.pi * x))),  # Exponential growth mean, sinusoidal variance
-            torch.normal(1 / (x + 0.5), 0.3 + 0.3 * torch.cos(3 * np.pi * x)),  # Reciprocal mean, high-frequency cosine variance
-            torch.normal(x - 1.25, 0.1 + 0.3 * torch.heaviside(torch.sin(4 * np.pi * x), torch.zeros_like(x))),  # Linear mean, sinusoidal variance
-            torch.normal(x**4 - x**3, 0.1 + 0.2 * x),  # Quartic mean, linear variance
-            torch.normal(2 * torch.sin(2 * np.pi * x), 0.2 + 0.4 * torch.exp(-x)),  # Sinusoidal mean, exponential decay variance
-            torch.normal(torch.log(x + 2), 0.5 + 0.5 * torch.sin(2 * np.pi * x)),  # Logarithmic mean, sinusoidal variance
-            torch.normal(torch.sign(x - 1.25), 0.1 + 0.3 * torch.exp(-x))  # Sign function mean, exponential decay variance
+            torch.normal(torch.sin(2 * np.pi * x), torch.exp(torch.cos(np.pi * x))),
+            torch.normal(-torch.cos(2 * np.pi * x), torch.exp(torch.sin(np.pi * x))),
+            torch.normal(
+                x, torch.heaviside(torch.sin(4 * np.pi * x), torch.zeros_like(x))
+            ),
+            torch.normal(
+                torch.heaviside(torch.sin(np.pi * x), torch.zeros_like(x)), 0.2 * x
+            ),
         ]
     )
-
 
 
 train_x = torch.linspace(0, 2.5, 1000).unsqueeze(-1)
@@ -44,7 +25,7 @@ train_y = heteroskedastic_data(train_x)
 test_x = torch.linspace(0, 2.5, 250).unsqueeze(-1)
 test_y = heteroskedastic_data(test_x)
 
-batch_size = 128
+batch_size = 256
 train_dataset = torch.utils.data.TensorDataset(train_x, train_y)
 train_loader = torch.utils.data.DataLoader(
     train_dataset, batch_size=batch_size, shuffle=True
@@ -58,34 +39,17 @@ test_loader = torch.utils.data.DataLoader(
 
 class NGD(torch.optim.Optimizer):
 
-    def __init__(self, params, num_data, lr, momentum=0):
+    def __init__(self, params, num_data, lr):
         self.num_data = num_data
-        self.momentum = momentum
-        super().__init__(params, defaults=dict(lr=lr, momentum=momentum))
+        super().__init__(params, defaults=dict(lr=lr))
 
     @torch.no_grad()
     def step(self):
         for group in self.param_groups:
-            lr = group["lr"]
-            momentum = group["momentum"]
-
             for param in group["params"]:
                 if param.grad is None:
                     continue
-
-                # Initialize momentum buffer if not already set
-                param_state = self.state[param]
-                if "momentum_buffer" not in param_state:
-                    buf = param_state["momentum_buffer"] = torch.clone(param.grad).detach()
-                else:
-                    buf = param_state["momentum_buffer"]
-
-                # Update momentum buffer
-                buf.mul_(momentum).add_(param.grad, alpha=(1 - momentum))
-
-                # Update parameters using the momentum buffer
-                param.add_(buf, alpha=(-lr * self.num_data))
-
+                param.add_(param.grad, alpha=(-group["lr"] * self.num_data))
 
 
 class VariationalELBO(gpytorch.module.Module):
@@ -180,7 +144,7 @@ class MultitaskGPModel(gpytorch.models.ApproximateGP):
                 inducing_points,
                 variational_distribution,
                 learn_inducing_locations=True,
-                jitter_val=9e-3
+                jitter_val=1e-3,
             ),
             num_tasks=output_dims,
             num_latents=num_latents,
@@ -189,9 +153,9 @@ class MultitaskGPModel(gpytorch.models.ApproximateGP):
 
         super().__init__(variational_strategy)
         self.mean_module = gpytorch.means.ZeroMean(batch_shape=batch_shape)
-        self.covar_module = gpytorch.kernels.ScaleKernel(
-            gpytorch.kernels.RBFKernel(batch_shape=batch_shape), batch_shape=batch_shape
-        )
+        self.covar_module = gpytorch.kernels.RBFKernel(
+            batch_shape=batch_shape
+        ) + gpytorch.kernels.MaternKernel(nu=1.5, batch_shape=batch_shape)
 
     def forward(self, x):
         return gpytorch.distributions.MultivariateNormal(
@@ -199,10 +163,10 @@ class MultitaskGPModel(gpytorch.models.ApproximateGP):
         )
 
 
-output_dims = 25
+output_dims = 4
 input_dims = 1
-num_latents = 100
-num_inducing = 100
+num_latents = 10
+num_inducing = 20
 model = MultitaskGPModel(
     num_latents=num_latents,
     output_dims=2 * output_dims,
@@ -215,16 +179,14 @@ model.train()
 likelihood.train()
 
 variational_ngd_optimizer = NGD(
-    model.variational_parameters(), num_data=train_y.size(0), lr=0.01, momentum=0.999
+    model.variational_parameters(), num_data=train_y.size(0), lr=0.1
 )
 
 hyperparameter_optimizer = torch.optim.Adam(model.hyperparameters(), lr=0.01)
 # "Loss" for GPs - We are using the Variational ELBO
-mll = VariationalELBO(
-        likelihood, model, num_data=train_y.size(0)
-)
+mll = VariationalELBO(likelihood, model, num_data=train_y.size(0))
 
-num_epochs = 250
+num_epochs = 150
 
 epoch_iter = tqdm.tqdm(range(num_epochs), desc="Epoch")
 for i in epoch_iter:
@@ -269,7 +231,7 @@ for task in range(output_dims):
     # Plot test and training data
     ax.plot(test_x.squeeze(-1).numpy(), test_y[:, task].numpy(), "r*")
     ax.plot(train_x.squeeze(-1).numpy(), train_y[:, task].numpy(), "k*")
-    
+
     # Plot predictive means as blue line
     ax.plot(test_x.squeeze(-1).numpy(), mean[:, task].numpy(), "b")
     ax.plot(test_x.squeeze(-1).numpy(), median[:, task].numpy(), "g")
@@ -279,12 +241,14 @@ for task in range(output_dims):
         test_x.squeeze(-1).numpy(),
         lower[:, task].numpy(),
         upper[:, task].numpy(),
-        alpha=0.5
+        alpha=0.5,
     )
 
     ax.set_xmargin(0)
     ax.set_title(f"Output {task + 1}")
-axs[0].legend(["Test Data", "Training Data", "Mean", "Median", "Confidence"])  # Add the legend to each subplot
+axs[0].legend(
+    ["Test Data", "Training Data", "Mean", "Median", "Confidence"]
+)  # Add the legend to each subplot
 
 # Remove empty subplots if output_dims < rows * cols
 for idx in range(output_dims, rows * cols):
@@ -292,4 +256,3 @@ for idx in range(output_dims, rows * cols):
 
 fig.tight_layout()
 plt.show()
-
