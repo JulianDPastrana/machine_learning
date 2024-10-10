@@ -5,19 +5,38 @@ import tqdm
 from matplotlib import pyplot as plt
 
 
+
 def heteroskedastic_data(x):
     return torch.hstack(
         [
-            torch.normal(torch.sin(2 * np.pi * x), torch.exp(torch.cos(np.pi * x))),
-            torch.normal(-torch.cos(2 * np.pi * x), torch.exp(torch.sin(np.pi * x))),
-            torch.normal(
-                x, torch.heaviside(torch.sin(4 * np.pi * x), torch.zeros_like(x)) + 1e-2
-            ),
-            torch.normal(
-                torch.heaviside(torch.sin(np.pi * x), torch.zeros_like(x)), 0.2 * x
-            ),
+            torch.normal(torch.sin(2 * np.pi * x), 0.1 + 0.5 * torch.exp(torch.cos(np.pi * x))),  # Sinusoidal mean, exponential variance
+            torch.normal(-torch.cos(2 * np.pi * x), 0.1 + 0.5 * torch.exp(torch.sin(np.pi * x))),  # Cosine mean, exponential variance
+            torch.normal(x, 0.1 + 0.2 * torch.heaviside(torch.sin(4 * np.pi * x), torch.zeros_like(x))),  # Linear mean, sinusoidal variance
+            torch.normal(torch.heaviside(torch.sin(np.pi * x), torch.zeros_like(x)), 0.05 + 0.2 * x),  # Step mean, linear variance
+            torch.normal(torch.exp(-x), 0.2 + 0.3 * x),  # Exponential decay mean, linear variance
+            torch.normal(torch.log(1 + x), 0.1 + 0.3 * x),  # Logarithmic mean, linear variance
+            torch.normal(torch.sin(3 * np.pi * x), 0.05 + 0.2 * torch.abs(x - 1)),  # Sinusoidal mean, abs-based variance
+            torch.normal(-x**2, 0.1 + 0.4 * x**2),  # Quadratic mean, quadratic variance
+            torch.normal(x**3, 0.1 + 0.4 * torch.abs(x)),  # Cubic mean, abs-linear variance
+            torch.normal(1 / (1 + x), 0.3 + 0.3 * torch.sin(2 * np.pi * x)),  # Reciprocal mean, sinusoidal variance
+            torch.normal(torch.sqrt(x + 1e-3), 0.1 + 0.2 * torch.exp(-x)),  # Square root mean, exponential decay variance
+            torch.normal(torch.tanh(x), 0.1 + 0.5 * torch.abs(torch.cos(np.pi * x))),  # Hyperbolic tangent mean, cosine variance
+            torch.normal(1 / (x + 1), 0.1 + 0.3 * torch.heaviside(torch.sin(3 * np.pi * x), torch.zeros_like(x))),  # Reciprocal mean, heaviside variance
+            torch.normal(torch.abs(x - 1.25), 0.4 + 0.4 * torch.sin(2 * np.pi * x)),  # Absolute value mean, sinusoidal variance
+            torch.normal(torch.log(x + 1), 0.3 + 0.3 * torch.cos(np.pi * x)),  # Logarithmic mean, cosine variance
+            torch.normal(-torch.log(1 + x), 0.1 + 0.3 * torch.abs(x - 1.25)),  # Negative logarithmic mean, abs-based variance
+            torch.normal(torch.sin(5 * np.pi * x), 0.1 + 0.2 * torch.exp(torch.sin(2 * np.pi * x))),  # High-frequency sinusoidal mean, sinusoidal variance
+            torch.normal(torch.abs(x), 0.1 + 0.4 * x**2),  # Absolute value mean, quadratic variance
+            torch.normal(torch.exp(x - 2.5), 0.1 + 0.5 * torch.abs(torch.sin(np.pi * x))),  # Exponential growth mean, sinusoidal variance
+            torch.normal(1 / (x + 0.5), 0.3 + 0.3 * torch.cos(3 * np.pi * x)),  # Reciprocal mean, high-frequency cosine variance
+            torch.normal(x - 1.25, 0.1 + 0.3 * torch.heaviside(torch.sin(4 * np.pi * x), torch.zeros_like(x))),  # Linear mean, sinusoidal variance
+            torch.normal(x**4 - x**3, 0.1 + 0.2 * x),  # Quartic mean, linear variance
+            torch.normal(2 * torch.sin(2 * np.pi * x), 0.2 + 0.4 * torch.exp(-x)),  # Sinusoidal mean, exponential decay variance
+            torch.normal(torch.log(x + 2), 0.5 + 0.5 * torch.sin(2 * np.pi * x)),  # Logarithmic mean, sinusoidal variance
+            torch.normal(torch.sign(x - 1.25), 0.1 + 0.3 * torch.exp(-x))  # Sign function mean, exponential decay variance
         ]
     )
+
 
 
 train_x = torch.linspace(0, 2.5, 1000).unsqueeze(-1)
@@ -39,17 +58,34 @@ test_loader = torch.utils.data.DataLoader(
 
 class NGD(torch.optim.Optimizer):
 
-    def __init__(self, params, num_data, lr):
+    def __init__(self, params, num_data, lr, momentum=0):
         self.num_data = num_data
-        super().__init__(params, defaults=dict(lr=lr))
+        self.momentum = momentum
+        super().__init__(params, defaults=dict(lr=lr, momentum=momentum))
 
     @torch.no_grad()
     def step(self):
         for group in self.param_groups:
+            lr = group["lr"]
+            momentum = group["momentum"]
+
             for param in group["params"]:
                 if param.grad is None:
                     continue
-                param.add_(param.grad, alpha=(-group["lr"] * self.num_data))
+
+                # Initialize momentum buffer if not already set
+                param_state = self.state[param]
+                if "momentum_buffer" not in param_state:
+                    buf = param_state["momentum_buffer"] = torch.clone(param.grad).detach()
+                else:
+                    buf = param_state["momentum_buffer"]
+
+                # Update momentum buffer
+                buf.mul_(momentum).add_(param.grad, alpha=(1 - momentum))
+
+                # Update parameters using the momentum buffer
+                param.add_(buf, alpha=(-lr * self.num_data))
+
 
 
 class VariationalELBO(gpytorch.module.Module):
@@ -101,8 +137,9 @@ class ChainedGaussianLikelihood(gpytorch.module.Module):
 
     def forward(self, function_samples):
         mean = function_samples[..., ::2]
-        variance = torch.exp(function_samples[..., 1::2])
-        return gpytorch.distributions.base_distributions.Normal(mean, variance.sqrt())
+        link = torch.nn.Softplus()
+        scale = link(function_samples[..., 1::2]) + 1e-3
+        return gpytorch.distributions.base_distributions.Normal(mean, scale)
 
     def log_marginal(self, observations, function_dist):
         raise NotImplementedError
@@ -143,6 +180,7 @@ class MultitaskGPModel(gpytorch.models.ApproximateGP):
                 inducing_points,
                 variational_distribution,
                 learn_inducing_locations=True,
+                jitter_val=9e-3
             ),
             num_tasks=output_dims,
             num_latents=num_latents,
@@ -161,9 +199,9 @@ class MultitaskGPModel(gpytorch.models.ApproximateGP):
         )
 
 
-output_dims = 4
+output_dims = 25
 input_dims = 1
-num_latents = 8
+num_latents = 100
 num_inducing = 100
 model = MultitaskGPModel(
     num_latents=num_latents,
@@ -177,12 +215,14 @@ model.train()
 likelihood.train()
 
 variational_ngd_optimizer = NGD(
-    model.variational_parameters(), num_data=train_y.size(0), lr=0.5
+    model.variational_parameters(), num_data=train_y.size(0), lr=0.01, momentum=0.999
 )
 
 hyperparameter_optimizer = torch.optim.Adam(model.hyperparameters(), lr=0.01)
 # "Loss" for GPs - We are using the Variational ELBO
-mll = VariationalELBO(likelihood, model, num_data=train_y.size(0))
+mll = VariationalELBO(
+        likelihood, model, num_data=train_y.size(0)
+)
 
 num_epochs = 250
 
@@ -208,10 +248,11 @@ likelihood.eval()
 with torch.no_grad(), gpytorch.settings.fast_pred_var():
     observed_pred = likelihood(model(test_x))
     mean = observed_pred.mean.mean(dim=0)
-    variance = observed_pred.variance.mean(dim=0)
-    lower = mean - 1.96 * variance.sqrt()
-    upper = mean + 1.96 * variance.sqrt()
+    median = observed_pred.icdf(torch.Tensor([0.5])).mean(dim=0)
+    lower = observed_pred.icdf(torch.Tensor([0.025])).mean(dim=0)
+    upper = observed_pred.icdf(torch.Tensor([0.975])).mean(dim=0)
 
+# Determine grid size for subplots
 cols = int(np.ceil(np.sqrt(output_dims)))
 rows = int(np.ceil(output_dims / cols))
 
@@ -219,30 +260,31 @@ fig, axs = plt.subplots(
     rows, cols, figsize=(4 * cols, 4 * rows)
 )  # Adjust subplot size to maintain squareness
 
-# Flatten the axes array in case rows*cols > 1 for easy iteration
+# Flatten the axes array for easy iteration if rows*cols > 1
 axs = axs.ravel()
 
 for task in range(output_dims):
     ax = axs[task]  # Get the appropriate subplot
 
-    # Initialize plot
-    # Plot training data as black stars
+    # Plot test and training data
     ax.plot(test_x.squeeze(-1).numpy(), test_y[:, task].numpy(), "r*")
     ax.plot(train_x.squeeze(-1).numpy(), train_y[:, task].numpy(), "k*")
+    
     # Plot predictive means as blue line
     ax.plot(test_x.squeeze(-1).numpy(), mean[:, task].numpy(), "b")
+    ax.plot(test_x.squeeze(-1).numpy(), median[:, task].numpy(), "g")
 
     # Shade between the lower and upper confidence bounds
     ax.fill_between(
         test_x.squeeze(-1).numpy(),
         lower[:, task].numpy(),
         upper[:, task].numpy(),
-        alpha=0.5,
+        alpha=0.5
     )
 
-    ax.legend(["Test Data", "Test Data", "Mean", "Confidence"])
     ax.set_xmargin(0)
     ax.set_title(f"Output {task + 1}")
+axs[0].legend(["Test Data", "Training Data", "Mean", "Median", "Confidence"])  # Add the legend to each subplot
 
 # Remove empty subplots if output_dims < rows * cols
 for idx in range(output_dims, rows * cols):
@@ -250,3 +292,4 @@ for idx in range(output_dims, rows * cols):
 
 fig.tight_layout()
 plt.show()
+
